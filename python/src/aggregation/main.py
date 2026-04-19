@@ -17,8 +17,8 @@ TOP_SIZE = int(os.environ["TOP_SIZE"])
 class AggregationFilter:
 
     def __init__(self):
-        self.input_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
-            MOM_HOST, AGGREGATION_PREFIX, [f"{AGGREGATION_PREFIX}_{ID}"]
+        self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
+            MOM_HOST, f"{AGGREGATION_PREFIX}_{ID}"
         )
         self.output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, OUTPUT_QUEUE
@@ -60,7 +60,7 @@ class AggregationFilter:
         ack()
 
     def start(self):
-        self.input_exchange.start_consuming(self.process_messsage)
+        self.input_queue.start_consuming(self.process_messsage)
 
 
 def main():

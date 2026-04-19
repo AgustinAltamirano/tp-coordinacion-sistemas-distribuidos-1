@@ -1,6 +1,7 @@
 import os
 import logging
 import threading
+import zlib
 
 from common import middleware, message_protocol, fruit_item
 from .control_message_constants import ControlMessageType
@@ -27,12 +28,12 @@ class SumFilter:
         self.control_exchange_output = middleware.MessageMiddlewareExchangeRabbitMQ(
             MOM_HOST, SUM_CONTROL_EXCHANGE, [SUM_PREFIX]
         )
-        self.data_output_exchanges = []
+        self.data_output_queues = []
         for i in range(AGGREGATION_AMOUNT):
-            data_output_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
-                MOM_HOST, AGGREGATION_PREFIX, [f"{AGGREGATION_PREFIX}_{i}"]
+            data_output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
+                MOM_HOST, f"{AGGREGATION_PREFIX}_{i}"
             )
-            self.data_output_exchanges.append(data_output_exchange)
+            self.data_output_queues.append(data_output_queue)
         self.fruit_storage = FruitStorage()
         self.message_count_controller = MessageCountController()
         self.control_thread = None
@@ -107,14 +108,20 @@ class SumFilter:
     def _flush_client_fruits(self, client_id):
         logging.info(f"Flushing fruits for client {client_id}")
         for final_fruit_item in self.fruit_storage.pop_client_fruits(client_id):
-            for data_output_exchange in self.data_output_exchanges:
-                data_output_exchange.send(
-                    message_protocol.internal.serialize(
-                        [client_id, final_fruit_item.fruit, final_fruit_item.amount]
-                    )
+            destination_index = self._client_fruit_hash(client_id, final_fruit_item)
+            self.data_output_queues[destination_index].send(
+                message_protocol.internal.serialize(
+                    [client_id, final_fruit_item.fruit, final_fruit_item.amount]
                 )
-        for data_output_exchange in self.data_output_exchanges:
-            data_output_exchange.send(message_protocol.internal.serialize([client_id]))
+            )
+        for data_output_queue in self.data_output_queues:
+            data_output_queue.send(message_protocol.internal.serialize([client_id]))
+
+    def _client_fruit_hash(self, client_id: str, fruit: fruit_item.FruitItem) -> int:
+        return (
+            zlib.crc32(f"{client_id}_{fruit.fruit}".encode("utf-8"))
+            % AGGREGATION_AMOUNT
+        )
 
     def process_control_message(self, message, ack, nack):
         fields = message_protocol.internal.deserialize(message)
