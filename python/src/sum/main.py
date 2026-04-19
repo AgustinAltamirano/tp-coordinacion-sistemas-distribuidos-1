@@ -5,9 +5,9 @@ import threading
 import zlib
 
 from common import middleware, message_protocol, fruit_item
-from .control_message_constants import ControlMessageType
-from .fruit_storage import FruitStorage
-from .message_count_controller import MessageCountController
+from control_message_constants import ControlMessageType
+from fruit_storage import FruitStorage
+from message_count_controller import MessageCountController
 
 ID = int(os.environ["ID"])
 MOM_HOST = os.environ["MOM_HOST"]
