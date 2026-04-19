@@ -3,6 +3,9 @@ import logging
 import threading
 
 from common import middleware, message_protocol, fruit_item
+from .control_message_constants import ControlMessageType
+from .fruit_storage import FruitStorage
+from .message_count_controller import MessageCountController
 
 ID = int(os.environ["ID"])
 MOM_HOST = os.environ["MOM_HOST"]
@@ -15,9 +18,14 @@ AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
 
 
 class SumFilter:
+    control_exchange_control: middleware.MessageMiddlewareExchangeRabbitMQ
+
     def __init__(self):
         self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, INPUT_QUEUE
+        )
+        self.control_exchange_output = middleware.MessageMiddlewareExchangeRabbitMQ(
+            MOM_HOST, SUM_CONTROL_EXCHANGE, [SUM_PREFIX]
         )
         self.data_output_exchanges = []
         for i in range(AGGREGATION_AMOUNT):
@@ -25,34 +33,41 @@ class SumFilter:
                 MOM_HOST, AGGREGATION_PREFIX, [f"{AGGREGATION_PREFIX}_{i}"]
             )
             self.data_output_exchanges.append(data_output_exchange)
-        self.amount_by_fruit_by_client: dict[str, dict[str, fruit_item.FruitItem]] = {}
+        self.fruit_storage = FruitStorage()
+        self.message_count_controller = MessageCountController()
+        self.control_thread = None
 
     def _process_data(self, client_id, fruit, amount):
         logging.info(f"Process data")
-        current_fruit_item = self.amount_by_fruit_by_client.setdefault(
-            client_id, {}
-        ).setdefault(fruit, fruit_item.FruitItem(fruit, 0))
-        self.amount_by_fruit_by_client[client_id][fruit] = (
-            current_fruit_item + fruit_item.FruitItem(fruit, int(amount))
+        self.fruit_storage.add_fruit_to_client(client_id, fruit, int(amount))
+        message_count, eof_received = (
+            self.message_count_controller.increase_instance_message_count(client_id)
+        )
+        if eof_received:
+            self.control_exchange_output.send(
+                message_protocol.internal.serialize(
+                    [
+                        ControlMessageType.PROCESSED_MESSAGE_COUNT.value,
+                        client_id,
+                        ID,
+                        message_count,
+                    ]
+                )
+            )
+
+    def _process_eof(self, client_id, message_count):
+        logging.info(f"Received EOF from input queue")
+        self.control_exchange_output.send(
+            message_protocol.internal.serialize(
+                [
+                    ControlMessageType.EOF_RECEIVED.value,
+                    client_id,
+                    message_count,
+                ]
+            )
         )
 
-    def _process_eof(self, client_id):
-        logging.info(f"Broadcasting data messages")
-        for final_fruit_item in self.amount_by_fruit_by_client[client_id].values():
-            for data_output_exchange in self.data_output_exchanges:
-                data_output_exchange.send(
-                    message_protocol.internal.serialize(
-                        [client_id, final_fruit_item.fruit, final_fruit_item.amount]
-                    )
-                )
-
-        logging.info(f"Broadcasting EOF message")
-        for data_output_exchange in self.data_output_exchanges:
-            data_output_exchange.send(message_protocol.internal.serialize([client_id]))
-
-        del self.amount_by_fruit_by_client[client_id]
-
-    def process_data_messsage(self, message, ack, nack):
+    def process_data_message(self, message, ack, nack):
         fields = message_protocol.internal.deserialize(message)
         if len(fields) == 3:
             self._process_data(*fields)
@@ -60,8 +75,67 @@ class SumFilter:
             self._process_eof(*fields)
         ack()
 
+    def _process_control_eof_received(self, client_id, message_count):
+        instance_processed_message_count = (
+            self.message_count_controller.set_global_expected_message_count(
+                client_id, message_count
+            )
+        )
+        self.control_exchange_control.send(
+            message_protocol.internal.serialize(
+                [
+                    ControlMessageType.PROCESSED_MESSAGE_COUNT.value,
+                    client_id,
+                    ID,
+                    instance_processed_message_count,
+                ]
+            )
+        )
+
+    def _process_control_processed_message_count(
+        self, client_id, sum_instance_id, message_count
+    ):
+        if not self.message_count_controller.has_client_eof(client_id):
+            return
+        self.message_count_controller.update_global_message_count(
+            client_id, sum_instance_id, message_count
+        )
+        if self.message_count_controller.client_has_received_all_messages(client_id):
+            self._flush_client_fruits(client_id)
+            self.message_count_controller.reset_client_count(client_id)
+
+    def _flush_client_fruits(self, client_id):
+        logging.info(f"Flushing fruits for client {client_id}")
+        for final_fruit_item in self.fruit_storage.pop_client_fruits(client_id):
+            for data_output_exchange in self.data_output_exchanges:
+                data_output_exchange.send(
+                    message_protocol.internal.serialize(
+                        [client_id, final_fruit_item.fruit, final_fruit_item.amount]
+                    )
+                )
+        for data_output_exchange in self.data_output_exchanges:
+            data_output_exchange.send(message_protocol.internal.serialize([client_id]))
+
+    def process_control_message(self, message, ack, nack):
+        fields = message_protocol.internal.deserialize(message)
+        if fields[0] == ControlMessageType.EOF_RECEIVED.value:
+            self._process_control_eof_received(fields[1], fields[2])
+        elif fields[0] == ControlMessageType.PROCESSED_MESSAGE_COUNT.value:
+            self._process_control_processed_message_count(
+                fields[1], fields[2], fields[3]
+            )
+        ack()
+
+    def start_control(self):
+        self.control_exchange_control = middleware.MessageMiddlewareExchangeRabbitMQ(
+            MOM_HOST, SUM_CONTROL_EXCHANGE, [SUM_PREFIX]
+        )
+        self.control_exchange_control.start_consuming(self.process_control_message)
+
     def start(self):
-        self.input_queue.start_consuming(self.process_data_messsage)
+        self.control_thread = threading.Thread(target=self.start_control)
+        self.control_thread.start()
+        self.input_queue.start_consuming(self.process_data_message)
 
 
 def main():
