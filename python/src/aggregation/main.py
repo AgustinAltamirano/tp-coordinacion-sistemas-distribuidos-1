@@ -1,5 +1,6 @@
 import os
 import logging
+import signal
 import heapq
 
 from common import middleware, message_protocol, fruit_item
@@ -51,13 +52,34 @@ class AggregationFilter:
             self._process_eof(*fields)
         ack()
 
+    def handle_sigterm(self):
+        logging.info("SIGTERM received, requesting shutdown")
+        try:
+            self.input_queue.request_stop_consuming()
+        except Exception as e:
+            logging.error(e)
+
+    def _close_resources(self):
+        for middleware in (self.input_queue, self.output_queue):
+            try:
+                middleware.close()
+            except Exception as e:
+                logging.error(e)
+
     def start(self):
-        self.input_queue.start_consuming(self.process_messsage)
+        try:
+            self.input_queue.start_consuming(self.process_messsage)
+        finally:
+            self._close_resources()
 
 
 def main():
     logging.basicConfig(level=logging.INFO)
     aggregation_filter = AggregationFilter()
+    signal.signal(
+        signal.SIGTERM,
+        lambda signum, frame: aggregation_filter.handle_sigterm(),
+    )
     aggregation_filter.start()
     return 0
 

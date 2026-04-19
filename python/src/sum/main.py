@@ -1,5 +1,6 @@
 import os
 import logging
+import signal
 import threading
 import zlib
 
@@ -19,8 +20,6 @@ AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
 
 
 class SumFilter:
-    control_exchange_control: middleware.MessageMiddlewareExchangeRabbitMQ
-
     def __init__(self):
         self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, INPUT_QUEUE
@@ -37,6 +36,8 @@ class SumFilter:
         self.fruit_storage = FruitStorage()
         self.message_count_controller = MessageCountController()
         self.control_thread = None
+        self.control_exchange_control = None
+        self.sigterm_received = threading.Event()
 
     def _process_data(self, client_id, fruit, amount):
         logging.info(f"Process data")
@@ -82,6 +83,10 @@ class SumFilter:
                 client_id, message_count
             )
         )
+        if not self.control_exchange_control:
+            logging.error("Control exchange not initialized")
+            return
+
         self.control_exchange_control.send(
             message_protocol.internal.serialize(
                 [
@@ -137,17 +142,63 @@ class SumFilter:
         self.control_exchange_control = middleware.MessageMiddlewareExchangeRabbitMQ(
             MOM_HOST, SUM_CONTROL_EXCHANGE, [SUM_PREFIX]
         )
+        if self.sigterm_received.is_set():
+            return
         self.control_exchange_control.start_consuming(self.process_control_message)
+
+    def handle_sigterm(self):
+        logging.info("SIGTERM received, requesting shutdown")
+        self.sigterm_received.set()
+        try:
+            self.input_queue.request_stop_consuming()
+        except Exception as e:
+            logging.error(e)
+        if self.control_exchange_control is not None:
+            try:
+                self.control_exchange_control.request_stop_consuming()
+            except Exception as e:
+                logging.error(e)
+
+    def _close_resources(self):
+        for data_output_queue in self.data_output_queues:
+            try:
+                data_output_queue.close()
+            except Exception as e:
+                logging.error(e)
+        for middleware in (
+            self.input_queue,
+            self.control_exchange_output,
+            self.control_exchange_control,
+        ):
+            if middleware is None:
+                continue
+            try:
+                middleware.close()
+            except Exception as e:
+                logging.error(e)
 
     def start(self):
         self.control_thread = threading.Thread(target=self.start_control)
         self.control_thread.start()
-        self.input_queue.start_consuming(self.process_data_message)
+        try:
+            self.input_queue.start_consuming(self.process_data_message)
+        finally:
+            if self.control_exchange_control is not None:
+                try:
+                    self.control_exchange_control.request_stop_consuming()
+                except Exception as e:
+                    logging.error(e)
+            self.control_thread.join()
+            self._close_resources()
 
 
 def main():
     logging.basicConfig(level=logging.INFO)
     sum_filter = SumFilter()
+    signal.signal(
+        signal.SIGTERM,
+        lambda signum, frame: sum_filter.handle_sigterm(),
+    )
     sum_filter.start()
     return 0
 

@@ -102,6 +102,10 @@ class MessageMiddlewareRabbitMQ:
         """
         self._channel.stop_consuming()
 
+    def request_stop_consuming(self):
+        """Thread-safe. Schedules stop_consuming on the connection's event loop."""
+        self._connection.add_callback_threadsafe(self._channel.stop_consuming)
+
     def close(self):
         """Closes the channel and connection with the broker.
 
