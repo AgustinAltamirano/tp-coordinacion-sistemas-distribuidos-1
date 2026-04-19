@@ -1,6 +1,6 @@
 import os
 import logging
-import bisect
+import heapq
 
 from common import middleware, message_protocol, fruit_item
 
@@ -23,32 +23,24 @@ class AggregationFilter:
         self.output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, OUTPUT_QUEUE
         )
-        self.fruit_top_by_client: dict[str, list[fruit_item.FruitItem]] = {}
+        self.fruits_by_client: dict[str, dict[str, fruit_item.FruitItem]] = {}
 
     def _process_data(self, client_id, fruit, amount):
         logging.info("Processing data message")
-        client_top = self.fruit_top_by_client.setdefault(client_id, [])
-        for i in range(len(client_top)):
-            if client_top[i].fruit == fruit:
-                client_top[i] = client_top[i] + fruit_item.FruitItem(fruit, amount)
-                return
-        bisect.insort(client_top, fruit_item.FruitItem(fruit, amount))
+        client_fruits = self.fruits_by_client.setdefault(client_id, {})
+        client_fruits[fruit] = client_fruits.setdefault(
+            fruit, fruit_item.FruitItem(fruit, 0)
+        ) + fruit_item.FruitItem(fruit, amount)
 
     def _process_eof(self, client_id):
         logging.info("Received EOF")
-        client_top = self.fruit_top_by_client.get(client_id, [])
-        fruit_chunk = list(client_top[-TOP_SIZE:])
-        fruit_chunk.reverse()
-        fruit_top = list(
-            map(
-                lambda fruit_item: (fruit_item.fruit, fruit_item.amount),
-                fruit_chunk,
-            )
-        )
+        client_fruits = self.fruits_by_client.get(client_id, {})
+        top_k = heapq.nlargest(TOP_SIZE, client_fruits.values())
+        fruit_top = [(item.fruit, item.amount) for item in top_k]
         self.output_queue.send(
             message_protocol.internal.serialize([client_id, fruit_top])
         )
-        del self.fruit_top_by_client[client_id]
+        self.fruits_by_client.pop(client_id, None)
 
     def process_messsage(self, message, ack, nack):
         logging.info("Process message")
