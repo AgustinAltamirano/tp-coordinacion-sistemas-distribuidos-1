@@ -40,7 +40,7 @@ class SumFilter:
         self.sigterm_received = threading.Event()
 
     def _process_data(self, client_id, fruit, amount):
-        logging.info(f"Process data")
+        logging.info(f"Processing data for client {client_id}")
         self.fruit_storage.add_fruit_to_client(client_id, fruit, int(amount))
         message_count, eof_received = (
             self.message_count_controller.increase_instance_message_count(client_id)
@@ -58,7 +58,9 @@ class SumFilter:
             )
 
     def _process_eof(self, client_id, message_count):
-        logging.info(f"Received EOF from input queue")
+        logging.info(
+            f"Received input EOF for client {client_id}, expected={message_count}"
+        )
         self.control_exchange_output.send(
             message_protocol.internal.serialize(
                 [
@@ -111,7 +113,7 @@ class SumFilter:
             self.message_count_controller.reset_client_count(client_id)
 
     def _flush_client_fruits(self, client_id):
-        logging.info(f"Flushing fruits for client {client_id}")
+        logging.info(f"Barrier met for client {client_id}, flushing fruits")
         for final_fruit_item in self.fruit_storage.pop_client_fruits(client_id):
             destination_index = self._client_fruit_hash(client_id, final_fruit_item)
             self.data_output_queues[destination_index].send(

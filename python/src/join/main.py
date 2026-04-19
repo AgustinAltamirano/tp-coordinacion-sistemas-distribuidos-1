@@ -28,17 +28,23 @@ class JoinFilter:
         self.partial_tops_received_by_client: dict[str, int] = {}
 
     def process_messsage(self, message, ack, nack):
-        logging.info("Received top")
         client_id, partial_fruit_top = message_protocol.internal.deserialize(message)
         self._add_partial_top(client_id, partial_fruit_top)
         self.partial_tops_received_by_client[client_id] = (
             self.partial_tops_received_by_client.get(client_id, 0) + 1
         )
-        if self.partial_tops_received_by_client[client_id] == AGGREGATION_AMOUNT:
-            final_fruit_top = self._calculate_final_fruit_top(client_id)
-            self._send_final_fruit_top(client_id, final_fruit_top)
-            self.fruits_by_client.pop(client_id, None)
-            self.partial_tops_received_by_client.pop(client_id, None)
+        logging.info(
+            f"Received top {self.partial_tops_received_by_client[client_id]}"
+            f"/{AGGREGATION_AMOUNT} for client {client_id}"
+        )
+        if self.partial_tops_received_by_client[client_id] < AGGREGATION_AMOUNT:
+            ack()
+            return
+        final_fruit_top = self._calculate_final_fruit_top(client_id)
+        logging.info(f"Emitting final top for client {client_id}")
+        self._send_final_fruit_top(client_id, final_fruit_top)
+        self.fruits_by_client.pop(client_id, None)
+        self.partial_tops_received_by_client.pop(client_id, None)
         ack()
 
     def _add_partial_top(self, client_id, partial_fruit_top):

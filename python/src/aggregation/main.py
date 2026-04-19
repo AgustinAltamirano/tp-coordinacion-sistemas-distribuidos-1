@@ -25,26 +25,45 @@ class AggregationFilter:
             MOM_HOST, OUTPUT_QUEUE
         )
         self.fruits_by_client: dict[str, dict[str, fruit_item.FruitItem]] = {}
+        self.eof_count_by_client: dict[str, int] = {}
 
     def _process_data(self, client_id, fruit, amount):
-        logging.info("Processing data message")
+        logging.info(f"Processing data for client {client_id}")
         client_fruits = self.fruits_by_client.setdefault(client_id, {})
         client_fruits[fruit] = client_fruits.setdefault(
             fruit, fruit_item.FruitItem(fruit, 0)
         ) + fruit_item.FruitItem(fruit, amount)
 
     def _process_eof(self, client_id):
-        logging.info("Received EOF")
+        self.eof_count_by_client[client_id] = (
+            self.eof_count_by_client.get(client_id, 0) + 1
+        )
+        logging.info(
+            f"Received EOF {self.eof_count_by_client[client_id]}/{SUM_AMOUNT} "
+            f"for client {client_id}"
+        )
+        if self.eof_count_by_client[client_id] < SUM_AMOUNT:
+            return
+        partial_fruit_top = self._calculate_partial_fruit_top(client_id)
+        self._send_partial_fruit_top(client_id, partial_fruit_top)
+        self.fruits_by_client.pop(client_id, None)
+        self.eof_count_by_client.pop(client_id, None)
+
+    def _calculate_partial_fruit_top(self, client_id):
         client_fruits = self.fruits_by_client.get(client_id, {})
         top_k = heapq.nlargest(TOP_SIZE, client_fruits.values())
-        fruit_top = [(item.fruit, item.amount) for item in top_k]
-        self.output_queue.send(
-            message_protocol.internal.serialize([client_id, fruit_top])
+        return [(item.fruit, item.amount) for item in top_k]
+
+    def _send_partial_fruit_top(self, client_id, partial_fruit_top):
+        logging.info(
+            f"Sending partial top for client {client_id} "
+            f"with {len(partial_fruit_top)} fruits"
         )
-        self.fruits_by_client.pop(client_id, None)
+        self.output_queue.send(
+            message_protocol.internal.serialize([client_id, partial_fruit_top])
+        )
 
     def process_messsage(self, message, ack, nack):
-        logging.info("Process message")
         fields = message_protocol.internal.deserialize(message)
         if len(fields) == 3:
             self._process_data(*fields)
