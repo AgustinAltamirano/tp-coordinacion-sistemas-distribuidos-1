@@ -2,9 +2,15 @@ import os
 import logging
 import signal
 import threading
+import time
 import zlib
 
 from common import middleware, message_protocol, fruit_item
+from common.middleware.middleware import (
+    MessageMiddlewareDisconnectedError,
+    MessageMiddlewareMessageError,
+    MessageMiddlewareCloseError,
+)
 from control_message_constants import ControlMessageType
 from fruit_storage import FruitStorage
 from message_count_controller import MessageCountController
@@ -18,9 +24,27 @@ SUM_CONTROL_EXCHANGE = "SUM_CONTROL_EXCHANGE"
 AGGREGATION_AMOUNT = int(os.environ["AGGREGATION_AMOUNT"])
 AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
 
+RETRY_DELAYS = (1, 2, 4, 8, 16)
+
 
 class SumFilter:
     def __init__(self):
+        self.input_queue = None
+        self.control_exchange_output = None
+        self.control_exchange_control = None
+        self.data_output_queues = []
+        self.fruit_storage = FruitStorage()
+        self.message_count_controller = MessageCountController()
+        self.control_thread = None
+        self.control_thread_exception = None
+        self.sigterm_received = threading.Event()
+        try:
+            self._build_middlewares()
+        except (MessageMiddlewareDisconnectedError, MessageMiddlewareMessageError):
+            self._close_resources()
+            raise
+
+    def _build_middlewares(self):
         self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, INPUT_QUEUE
         )
@@ -33,11 +57,6 @@ class SumFilter:
                 MOM_HOST, f"{AGGREGATION_PREFIX}_{i}"
             )
             self.data_output_queues.append(data_output_queue)
-        self.fruit_storage = FruitStorage()
-        self.message_count_controller = MessageCountController()
-        self.control_thread = None
-        self.control_exchange_control = None
-        self.sigterm_received = threading.Event()
 
     def _process_data(self, client_id, fruit, amount):
         logging.info(f"Processing data for client {client_id}")
@@ -46,6 +65,7 @@ class SumFilter:
             self.message_count_controller.increase_instance_message_count(client_id)
         )
         if eof_received:
+            assert self.control_exchange_output is not None
             self.control_exchange_output.send(
                 message_protocol.internal.serialize(
                     [
@@ -61,6 +81,7 @@ class SumFilter:
         logging.info(
             f"Received input EOF for client {client_id}, expected={message_count}"
         )
+        assert self.control_exchange_output is not None
         self.control_exchange_output.send(
             message_protocol.internal.serialize(
                 [
@@ -85,10 +106,7 @@ class SumFilter:
                 client_id, message_count
             )
         )
-        if not self.control_exchange_control:
-            logging.error("Control exchange not initialized")
-            return
-
+        assert self.control_exchange_control is not None
         self.control_exchange_control.send(
             message_protocol.internal.serialize(
                 [
@@ -141,20 +159,35 @@ class SumFilter:
         ack()
 
     def start_control(self):
-        self.control_exchange_control = middleware.MessageMiddlewareExchangeRabbitMQ(
-            MOM_HOST, SUM_CONTROL_EXCHANGE, [SUM_PREFIX]
-        )
-        if self.sigterm_received.is_set():
-            return
-        self.control_exchange_control.start_consuming(self.process_control_message)
+        try:
+            self.control_exchange_control = (
+                middleware.MessageMiddlewareExchangeRabbitMQ(
+                    MOM_HOST, SUM_CONTROL_EXCHANGE, [SUM_PREFIX]
+                )
+            )
+            if self.sigterm_received.is_set():
+                return
+            self.control_exchange_control.start_consuming(self.process_control_message)
+        except (
+            MessageMiddlewareDisconnectedError,
+            MessageMiddlewareMessageError,
+        ) as middleware_err:
+            self.control_thread_exception = middleware_err
+            logging.error(f"Control thread error: {middleware_err}")
+            if self.input_queue is not None:
+                try:
+                    self.input_queue.request_stop_consuming()
+                except Exception as e:
+                    logging.error(e)
 
     def handle_sigterm(self):
         logging.info("SIGTERM received, requesting shutdown")
         self.sigterm_received.set()
-        try:
-            self.input_queue.request_stop_consuming()
-        except Exception as e:
-            logging.error(e)
+        if self.input_queue is not None:
+            try:
+                self.input_queue.request_stop_consuming()
+            except Exception as e:
+                logging.error(e)
         if self.control_exchange_control is not None:
             try:
                 self.control_exchange_control.request_stop_consuming()
@@ -165,21 +198,27 @@ class SumFilter:
         for data_output_queue in self.data_output_queues:
             try:
                 data_output_queue.close()
-            except Exception as e:
-                logging.error(e)
-        for middleware in (
+            except MessageMiddlewareCloseError as close_err:
+                logging.error(close_err)
+        for mw in (
             self.input_queue,
             self.control_exchange_output,
             self.control_exchange_control,
         ):
-            if middleware is None:
+            if mw is None:
                 continue
             try:
-                middleware.close()
-            except Exception as e:
-                logging.error(e)
+                mw.close()
+            except MessageMiddlewareCloseError as close_err:
+                logging.error(close_err)
+        self.input_queue = None
+        self.control_exchange_output = None
+        self.control_exchange_control = None
+        self.data_output_queues = []
 
-    def start(self):
+    def _run(self):
+        assert self.input_queue is not None
+        self.control_thread_exception = None
         self.control_thread = threading.Thread(target=self.start_control)
         self.control_thread.start()
         try:
@@ -188,10 +227,50 @@ class SumFilter:
             if self.control_exchange_control is not None:
                 try:
                     self.control_exchange_control.request_stop_consuming()
-                except Exception as e:
-                    logging.error(e)
+                except Exception as stop_err:
+                    logging.error(stop_err)
             self.control_thread.join()
-            self._close_resources()
+        if self.control_thread_exception is not None:
+            raise self.control_thread_exception
+
+    def start(self):
+        attempt = 0
+        while True:
+            try:
+                self._run()
+                self._close_resources()
+                return
+            except MessageMiddlewareMessageError as message_err:
+                logging.error(f"MessageError: {message_err}")
+                self._close_resources()
+                raise
+            except MessageMiddlewareDisconnectedError:
+                if self.sigterm_received.is_set():
+                    self._close_resources()
+                    return
+                if attempt >= len(RETRY_DELAYS):
+                    logging.error("Disconnected: retries exhausted")
+                    self._close_resources()
+                    raise
+                delay = RETRY_DELAYS[attempt]
+                logging.warning(
+                    f"Disconnected, retry {attempt + 1}/{len(RETRY_DELAYS)} "
+                    f"in {delay}s"
+                )
+                self._close_resources()
+                time.sleep(delay)
+                attempt += 1
+                try:
+                    self._build_middlewares()
+                except MessageMiddlewareMessageError as message_err_2:
+                    logging.error(f"MessageError during rebuild: {message_err_2}")
+                    self._close_resources()
+                    raise
+                except MessageMiddlewareDisconnectedError as disconnect_err_2:
+                    logging.warning(
+                        f"Rebuild failed due to Disconnected: {disconnect_err_2}"
+                    )
+                    continue
 
 
 def main():

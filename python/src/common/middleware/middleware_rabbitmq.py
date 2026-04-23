@@ -50,7 +50,6 @@ class MessageMiddlewareRabbitMQ:
         If it fails, closes the connection before propagating the exception.
         """
         self._channel = self._connection.channel()
-        self._channel.basic_qos(prefetch_count=1)
         self._channel.confirm_delivery()
 
     def _generate_on_message_callback(self, on_message_callback):
