@@ -1,12 +1,19 @@
 # Trabajo Práctico - Coordinación
 
+- **Alumno**: Agustín Altamirano
+- **Padrón**: 110237
+
+**Aclaración**: El informe del trabajo práctico se encuentra dispobible en [informe.md](informe.md)
+
+---
+
 En este trabajo se busca familiarizar a los estudiantes con los desafíos de la coordinación del trabajo y el control de la complejidad en sistemas distribuidos. Para tal fin se provee un esqueleto de un sistema de control de stock de una verdulería y un conjunto de escenarios de creciente grado de complejidad y distribución que demandarán mayor sofisticación en la comunicación de las partes involucradas.
 
 ## Ejecución
 
 `make up` : Inicia los contenedores del sistema y comienza a seguir los logs de todos ellos en un solo flujo de salida.
 
-`make down`:   Detiene los contenedores y libera los recursos asociados.
+`make down`: Detiene los contenedores y libera los recursos asociados.
 
 `make logs`: Sigue los logs de todos los contenedores en un solo flujo de salida.
 
@@ -16,8 +23,8 @@ En este trabajo se busca familiarizar a los estudiantes con los desafíos de la 
 
 ## Elementos del sistema objetivo
 
-![ ](./imgs/diagrama_de_robustez.jpg  "Diagrama de Robustez")
-*Fig. 1: Diagrama de Robustez*
+![ ](./imgs/diagrama_de_robustez.jpg "Diagrama de Robustez")
+_Fig. 1: Diagrama de Robustez_
 
 ### Client
 
@@ -30,8 +37,8 @@ El criterio y tamaño del top dependen de la configuración del sistema. Por def
 Es el punto de entrada y salida del sistema. Intercambia mensajes con los clientes y las colas internas utilizando distintos protocolos.
 
 ### Sum
- 
-Recibe pares  (fruta, cantidad) y aplica la función Suma de la clase `FruitItem`. Por defecto esa suma es la canónica para los números enteros, ej:
+
+Recibe pares (fruta, cantidad) y aplica la función Suma de la clase `FruitItem`. Por defecto esa suma es la canónica para los números enteros, ej:
 
 `("manzana", 5) + ("manzana", 8) = ("manzana", 13)`
 
@@ -54,21 +61,21 @@ La implementación base respeta la división de responsabilidades de los distint
 
 No obstante, esta implementación no cubre los objetivos buscados tal y como es presentada. Entre sus falencias puede destactarse que:
 
- - No se implementa la interfaz del middleware. 
- - No se dividen los flujos de datos de los clientes más allá del Gateway, por lo que no se es capaz de resolver múltiples consultas concurrentemente.
- - No se implementan mecanismos de sincronización que permitan escalar los controles Sum y Aggregator. En particular:
-   - Las instancias de Sum se dividen el trabajo, pero solo una de ellas recibe la notificación de finalización en la ingesta de datos.
-   - Las instancias de Sum realizan _broadcast_ a todas las instancias de Aggregator, en lugar de agrupar los datos por algún criterio y evitar procesamiento redundante.
-  - No se maneja la señal SIGTERM, con la salvedad de los clientes y el Gateway.
+- No se implementa la interfaz del middleware.
+- No se dividen los flujos de datos de los clientes más allá del Gateway, por lo que no se es capaz de resolver múltiples consultas concurrentemente.
+- No se implementan mecanismos de sincronización que permitan escalar los controles Sum y Aggregator. En particular:
+  - Las instancias de Sum se dividen el trabajo, pero solo una de ellas recibe la notificación de finalización en la ingesta de datos.
+  - Las instancias de Sum realizan _broadcast_ a todas las instancias de Aggregator, en lugar de agrupar los datos por algún criterio y evitar procesamiento redundante.
+- No se maneja la señal SIGTERM, con la salvedad de los clientes y el Gateway.
 
 ## Condiciones de Entrega
 
 El código de este repositorio se agrupa en dos carpetas, una para Python y otra para Golang. Los estudiantes deberán elegir **sólo uno** de estos lenguajes y realizar una implementación que funcione correctamente ante cambios en la multiplicidad de los controles (archivo de docker compose), los archivos de entrada y las implementaciones de las funciones de Suma y Comparación del `FruitItem`.
 
-![ ](./imgs/mutabilidad.jpg  "Mutabilidad de Elementos")
-*Fig. 2: Elementos mutables e inmutables*
+![ ](./imgs/mutabilidad.jpg "Mutabilidad de Elementos")
+_Fig. 2: Elementos mutables e inmutables_
 
-A modo de referencia, en la *Figura 2* se marcan en tonos oscuros los elementos que los estudiantes no deben alterar y en tonos claros aquellos sobre los que tienen libertad de decisión.
+A modo de referencia, en la _Figura 2_ se marcan en tonos oscuros los elementos que los estudiantes no deben alterar y en tonos claros aquellos sobre los que tienen libertad de decisión.
 Al momento de la evaluación y ejecución de las pruebas se **descartarán** o **reemplazarán** :
 
 - Los archivos de entrada de la carpeta `datasets`.
